@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "toolpkg_id": "com.operit.dsh_plugin_manager",
+  "version": "1.0.2",
+  "api_version": "1.0.0",
+  "main": "dist/main.js",
+  "display_name": {
+    "zh": "DSH 插件管理器（Operit 分支版）",
+    "en": "DSH Plugin Manager (Operit Branch)"
+  },
+  "description": {
+    "zh": "在 Operit 内原生管理 dsh 插件：自建独立 DSH runtime（不依赖 Operit 市场的 DeepSeek Harness 侧边栏包），启停 Web 服务，搜索/安装/卸载 dsh 插件，并做安装后自检；内置 Compose DSL 控制面板。",
+    "en": "Manage dsh plugins natively inside Operit: self-hosted DSH runtime (independent of the market DeepSeek Harness sidebar package), service control, plugin search/install/remove, post-install verification, with a built-in Compose DSL dashboard."
+  },
+  "enabled_by_default": false,
+  "subpackages": [
+    {
+      "id": "dsh_manager",
+      "entry": "dist/packages/dsh_plugin_manager.js"
+    }
+  ]
+}
