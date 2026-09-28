@@ -29,6 +29,7 @@ import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Check
 import androidx.compose.material.icons.filled.Store
+import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material3.*
 import androidx.compose.material3.TabRowDefaults.tabIndicatorOffset
@@ -195,6 +196,8 @@ fun PackageManagerScreen(
     var skillSearchQuery by rememberSaveable { mutableStateOf("") }
     var mcpSearchInput by rememberSaveable { mutableStateOf("") }
     var mcpSearchQuery by rememberSaveable { mutableStateOf("") }
+    var dshSearchInput by rememberSaveable { mutableStateOf("") }
+    var dshSearchQuery by rememberSaveable { mutableStateOf("") }
 
     // Environment variables dialog state
     var showEnvDialog by remember { mutableStateOf(false) }
@@ -259,6 +262,11 @@ fun PackageManagerScreen(
     LaunchedEffect(mcpSearchInput) {
         delay(320)
         mcpSearchQuery = mcpSearchInput.trim()
+    }
+
+    LaunchedEffect(dshSearchInput) {
+        delay(320)
+        dshSearchQuery = dshSearchInput.trim()
     }
 
     LaunchedEffect(availablePackages.value, packageSearchQuery) {
@@ -492,6 +500,7 @@ fun PackageManagerScreen(
             PackageTab.PACKAGES -> packageSearchInput
             PackageTab.SKILLS -> skillSearchInput
             PackageTab.MCP -> mcpSearchInput
+            PackageTab.DSH -> dshSearchInput
         }
     val activeSearchPlaceholderRes =
         when (selectedTab) {
@@ -499,6 +508,7 @@ fun PackageManagerScreen(
             PackageTab.PACKAGES -> R.string.package_market_search_placeholder
             PackageTab.SKILLS -> R.string.skill_market_search_placeholder
             PackageTab.MCP -> R.string.mcp_market_search_placeholder
+            PackageTab.DSH -> R.string.search
         }
     val activeSearchApplying =
         when (selectedTab) {
@@ -507,6 +517,7 @@ fun PackageManagerScreen(
                 packageSearchInput.trim() != packageSearchQuery || isPackageSearchFiltering
             PackageTab.SKILLS -> skillSearchInput.trim() != skillSearchQuery
             PackageTab.MCP -> mcpSearchInput.trim() != mcpSearchQuery
+            PackageTab.DSH -> dshSearchInput.trim() != dshSearchQuery
         }
 
     BindMarketSearchToTopBar(
@@ -518,6 +529,7 @@ fun PackageManagerScreen(
                 PackageTab.PACKAGES -> packageSearchInput = query
                 PackageTab.SKILLS -> skillSearchInput = query
                 PackageTab.MCP -> mcpSearchInput = query
+                PackageTab.DSH -> dshSearchInput = query
             }
         },
         searchPlaceholderRes = activeSearchPlaceholderRes,
@@ -768,6 +780,37 @@ fun PackageManagerScreen(
                         )
                     }
                 }
+                // DSH 插件标签
+                Tab(
+                    selected = selectedTab == PackageTab.DSH,
+                    onClick = { selectedTab = PackageTab.DSH },
+                    modifier = Modifier.height(48.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.Center
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Terminal,
+                            contentDescription = null,
+                            modifier = Modifier.size(16.dp),
+                            tint = if (selectedTab == PackageTab.DSH)
+                                MaterialTheme.colorScheme.primary
+                            else
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            "DSH",
+                            style = MaterialTheme.typography.bodySmall,
+                            softWrap = false,
+                            color = if (selectedTab == PackageTab.DSH)
+                                MaterialTheme.colorScheme.primary
+                            else
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
             }
 
             // 内容区域添加水平padding
@@ -927,6 +970,14 @@ fun PackageManagerScreen(
                         MCPConfigScreen(
                             onNavigateToMCPMarket = onNavigateToMCPMarket,
                             searchQuery = mcpSearchQuery
+                        )
+                    }
+                    PackageTab.DSH -> {
+                        DshPluginTabContent(
+                            searchQuery = dshSearchQuery,
+                            snackbarHost = { message ->
+                                scope.launch { snackbarHostState.showSnackbar(message) }
+                            }
                         )
                     }
                 }
