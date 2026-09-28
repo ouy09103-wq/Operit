@@ -5,5 +5,6 @@ enum class PackageTab {
     PACKAGES,
     SKILLS,
     // AUTOMATION_CONFIGS, // 临时隐藏自动化配置功能
-    MCP
+    MCP,
+    DSH
 }
