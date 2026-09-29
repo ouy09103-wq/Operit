@@ -69,11 +69,27 @@ import java.io.File
  *  - 本地 tar.gz 文件（复制到应用外部目录后以 file: 协议安装）
  *
  * 所有命令通过 Terminal.executeHiddenCommand 投递到 proot Ubuntu 环境执行。
+ *
+ * proot 环境自愈（参考 DSH-APP/DSHA 的 pnpm-env-fix.sh / heal-pnpm-shells.py）：
+ *  - proot 的 link2symlink 把 Android 私有目录里无法创建的真硬链接模拟成
+ *    .l2s 符号链，pnpm 默认硬链接铺包，临时文件一清理链就悬空（EPERM / ENOENT）；
+ *    改写 package-import-method=copy 从源头绕开；
+ *  - GitHub 来源插件 prepare 失败会留 .ignored_<name> 空壳，安装后自动换回。
  */
 
 private const val DSH_DEFAULT_PROFILE = "web"
 private const val DSH_STAGE_DIR_NAME = "dsh_stage"
 private const val DSH_EXECUTOR_KEY = "dsh_manager"
+
+/**
+ * dsh 数据 home。官方默认 / DSHA 规范都是 ~/.dsh；autostart 拉起的服务不带
+ * DSH_HOME 也读这里 —— 三方（CLI / 服务 / 手动命令）只有锚定同一棵树，
+ * 安装的插件才会被服务加载。
+ */
+private const val DSH_HOME_DIR = "/root/.dsh"
+
+/** dsh web 服务默认端口。 */
+private const val DSH_DEFAULT_PORT = "3081"
 
 /** 单引号包裹参数，避免 spec / profile 中的特殊字符破坏命令。 */
 private fun shellSingleQuote(value: String): String =
@@ -90,7 +106,7 @@ private fun dshRootProbePrelude(): String =
 private fun buildDshExec(body: String): String =
     dshRootProbePrelude() +
         "if [ -z \"\$DSH_ROOT\" ]; then echo '__DSH_NORT__'; " +
-        "else export DSH_HOME=\"\$DSH_ROOT/dsh-home\"; cd \"\$DSH_ROOT\"; " +
+        "else export DSH_HOME=\"$DSH_HOME_DIR\"; cd \"\$DSH_ROOT\"; " +
         body +
         "; fi"
 
@@ -99,11 +115,92 @@ private fun buildDshCliCall(args: String): String =
     "node \"\$DSH_ROOT/node_modules/@deepseek-ai/dsh/lib/bin.js\" $args 2>&1; " +
         "echo \"[dsh-exit]\$?\""
 
+/**
+ * pnpm 环境自愈（参照 DSHA 的 pnpm-env-fix.sh，含本机实测补强）。
+ *
+ * proot 的 link2symlink 把 Android 私有目录里无法创建的真硬链接模拟成 .l2s
+ * 符号链；pnpm 默认用硬链接把包从 store 铺到 node_modules，临时文件一清理
+ * 链就悬空，rename 报 EPERM，表现为各种莫名的安装失败。改写
+ * package-import-method=copy 从源头绕开（proot 下硬链接本来就是模拟的，
+ * 也没真省空间）；顺带清 store/tmp 失败残留与 /tmp 下的陈旧操作锁
+ * （proot fake-root 下 getuid=0 与旧锁属主不符会报 ERR_PNPM_STORE_DIR_OPEN_OPERATION_LOCK）。
+ * 全程幂等，只碰 pnpm 自己的配置与临时目录。
+ */
+private fun buildPnpmEnvHealCommand(): String =
+    "NPMRC=/root/.npmrc; touch \"\$NPMRC\" 2>/dev/null; " +
+        "if grep -q '^package-import-method=' \"\$NPMRC\" 2>/dev/null; then " +
+        "grep -q '^package-import-method=copy' \"\$NPMRC\" || " +
+        "sed -i 's|^package-import-method=.*|package-import-method=copy|' \"\$NPMRC\"; " +
+        "else printf 'package-import-method=copy\\n' >> \"\$NPMRC\"; fi; " +
+        "grep -q '^side-effects-cache=' \"\$NPMRC\" 2>/dev/null || " +
+        "printf 'side-effects-cache=false\\n' >> \"\$NPMRC\"; " +
+        "for S in /root/.local/share/pnpm/store/v* /root/.pnpm-store/v*; do " +
+        "if [ -d \"\$S/tmp\" ]; then " +
+        "find \"\$S/tmp\" -mindepth 1 -maxdepth 1 -exec rm -rf {} + 2>/dev/null; fi; " +
+        "done; " +
+        "rm -rf /tmp/pnpm-store-operation-locks-* 2>/dev/null; " +
+        "echo '__DSH_PNPM_ENV_OK__'"
+
+/**
+ * 修 pnpm 装一半留下的 `.ignored_<name>` 空壳（参照 DSHA heal-pnpm-shells.py）。
+ *
+ * GitHub 来源的插件 prepare/build 失败时（pnpm 11+ 默认拒绝未知包的 build
+ * script），pnpm 把已落地的完整目录 rename 成 .ignored_<name>，原位只留一个
+ * 含 _pnpmPlaceholder 标记的 package.json 壳 —— dsh 加载到的是壳，插件形同
+ * 不存在。仅在「原位确认是壳、且 .ignored_ 看起来完整」时换回，其余不碰。
+ */
+private fun buildIgnoredShellHealCommand(): String =
+    "for NM in /root/.dsh/profiles/*/node_modules; do " +
+        "[ -d \"\$NM\" ] || continue; " +
+        "for IG in \"\$NM\"/.ignored_*; do " +
+        "[ -d \"\$IG\" ] || continue; " +
+        "[ -f \"\$IG/package.json\" ] || continue; " +
+        "N=\${IG##*/}; N=\${N#.ignored_}; T=\"\$NM/\$N\"; " +
+        "H=0; " +
+        "if [ ! -e \"\$T\" ]; then H=1; " +
+        "elif [ ! -f \"\$T/package.json\" ]; then H=1; " +
+        "elif grep -q '_pnpmPlaceholder' \"\$T/package.json\" 2>/dev/null; then H=1; " +
+        "else C=\$(ls -A \"\$T\" 2>/dev/null | wc -l); [ \"\$C\" -le 1 ] && H=1; fi; " +
+        "if [ \"\$H\" = 1 ]; then rm -rf \"\$T\" 2>/dev/null; mv \"\$IG\" \"\$T\" 2>/dev/null; fi; " +
+        "done; done; " +
+        "echo '__DSH_SHELL_HEAL_OK__'"
+
+/**
+ * 重启 dsh web 服务：按进程 args 找旧 node 实例 kill 掉，再 setsid 脱离
+ * 会话拉起。不依赖 curl / ps（本 rootfs 二者缺失），只用 /proc 扫描 +
+ * kill + setsid + pidfile；跨应用（原版）的 node 因 uid 不同 kill 失败，
+ * 不会误伤。端口从 3081 起用 node 探测自适应：与本机其它实例共存时
+ * 自动顺延到空闲端口。
+ */
+private fun buildDshRestartCommand(): String =
+    "KILLED=0; " +
+        "for P in /proc/[0-9]*/cmdline; do " +
+        "PID=\${P#/proc/}; PID=\${PID%/cmdline}; " +
+        "FIRST=\$(tr '\\0' '\\n' < \"\$P\" 2>/dev/null | head -n 1); " +
+        "case \"\$FIRST\" in */node|node) ;; *) continue;; esac; " +
+        "tr '\\0' '\\n' < \"\$P\" 2>/dev/null | grep -q 'operit-dsh-runtime' || continue; " +
+        "kill \"\$PID\" 2>/dev/null && KILLED=\$((KILLED + 1)); " +
+        "done; " +
+        "sleep 1; " +
+        "PORT=$DSH_DEFAULT_PORT; " +
+        "while [ \"\$PORT\" -lt 3100 ]; do " +
+        "/usr/bin/node -e \"var s=require('net').createServer();" +
+        "s.once('error',function(){process.exit(1)});" +
+        "s.listen(\$PORT,'127.0.0.1',function(){s.close();process.exit(0)});\" 2>/dev/null && break; " +
+        "PORT=\$((PORT + 1)); " +
+        "done; " +
+        "setsid /usr/bin/node \"\$DSH_ROOT/node_modules/@deepseek-ai/dsh/lib/bin.js\" " +
+        "web --host 127.0.0.1 --port \"\$PORT\" " +
+        "--trusted-host \"127.0.0.1:\$PORT\" --no-open " +
+        ">> \"\$DSH_ROOT/dsh-web.log\" 2>&1 < /dev/null & " +
+        "printf '%s\\n' \"\$!\" > \"\$DSH_ROOT/dsh-web.pid\"; " +
+        "echo \"__DSH_RESTART_OK__=\$KILLED PORT=\$PORT\""
+
 /** 读取指定 profile 的 package.json；runtime / profile 缺失时输出对应标记。 */
 private fun buildProfileProbeCommand(profile: String): String =
     dshRootProbePrelude() +
         "if [ -z \"\$DSH_ROOT\" ]; then echo '__DSH_NORT__'; " +
-        "else P=\$DSH_ROOT/dsh-home/profiles/${shellSingleQuote(profile)}/package.json; " +
+        "else P=\"$DSH_HOME_DIR/profiles/${shellSingleQuote(profile)}/package.json\"; " +
         "echo \"__DSH_ROOT__\$DSH_ROOT\"; " +
         "if [ -f \"\$P\" ]; then cat \"\$P\"; else echo '__DSH_NOPROFILE__'; fi; fi"
 
@@ -246,11 +343,48 @@ fun DshPluginTabContent(
         refresh(profile)
     }
 
+    /** 执行一段在 runtime 守卫内运行的原始 shell 体（自愈 / 重启等）。 */
+    fun runRawCommand(body: String, timeoutMs: Long, onDone: (Boolean, String) -> Unit) {
+        scope.launch {
+            busy = true
+            val command = buildDshExec(body)
+            val result =
+                withContext(Dispatchers.IO) {
+                    Terminal.getInstance(context)
+                        .executeHiddenCommand(command, DSH_EXECUTOR_KEY, timeoutMs)
+                }
+            logText = result.output
+            val ok = !result.output.contains("__DSH_NORT__")
+            plugins = fetchPlugins(profile)
+            busy = false
+            onDone(ok, result.output)
+        }
+    }
+
+    /** 安装后处理：修 `.ignored_` 空壳 → 重启服务，使插件立即生效。 */
+    fun applyAndRestart(prefixMessage: String) {
+        statusText = "正在应用并重启服务…"
+        runRawCommand(
+            buildIgnoredShellHealCommand() + "; " + buildDshRestartCommand(),
+            120_000L
+        ) { ok, out ->
+            val port = Regex("PORT=(\\d+)").find(out)?.groupValues?.get(1)
+            statusText =
+                if (ok) {
+                    "$prefixMessage（服务已重启${if (port != null) "，端口 $port" else ""}）"
+                } else {
+                    "$prefixMessage（服务重启失败，可手动重启）"
+                }
+            if (!ok) showLog = true
+        }
+    }
+
     fun runPluginCommand(args: String, timeoutMs: Long, onDone: (Boolean, String) -> Unit) {
         scope.launch {
             busy = true
             statusText = "正在执行：$args"
-            val command = buildDshExec(buildDshCliCall(args))
+            // 执行前先做 pnpm 环境自愈（copy 导入模式），避免硬链接模拟链引发的安装失败
+            val command = buildDshExec(buildPnpmEnvHealCommand() + "; " + buildDshCliCall(args))
             val result =
                 withContext(Dispatchers.IO) {
                     Terminal.getInstance(context)
@@ -261,6 +395,26 @@ fun DshPluginTabContent(
             plugins = fetchPlugins(profile)
             busy = false
             onDone(ok, result.output)
+        }
+    }
+
+    fun restartService() {
+        runRawCommand(
+            buildIgnoredShellHealCommand() + "; " + buildDshRestartCommand(),
+            120_000L
+        ) { ok, out ->
+            val port = Regex("PORT=(\\d+)").find(out)?.groupValues?.get(1)
+            statusText =
+                if (ok) {
+                    "服务已重启${if (port != null) "（端口 $port）" else ""}"
+                } else {
+                    "服务重启失败，请查看日志"
+                }
+            if (ok) {
+                snackbarHost("dsh 服务已重启${if (port != null) "（端口 $port）" else ""}")
+            } else {
+                showLog = true
+            }
         }
     }
 
@@ -278,13 +432,13 @@ fun DshPluginTabContent(
             "plugin --profile ${shellSingleQuote(profile)} add ${shellSingleQuote(spec)}",
             600_000L
         ) { ok, _ ->
-            statusText =
-                if (ok) "安装完成：$spec" else "安装失败，请查看日志"
             if (ok) {
                 specInput = ""
                 localName = null
-                snackbarHost("已安装：$spec（重启 dsh 服务后生效）")
+                applyAndRestart("已安装：$spec")
+                snackbarHost("已安装：$spec")
             } else {
+                statusText = "安装失败，请查看日志"
                 showLog = true
             }
         }
@@ -295,10 +449,11 @@ fun DshPluginTabContent(
             "plugin --profile ${shellSingleQuote(profile)} remove ${shellSingleQuote(pluginName)}",
             300_000L
         ) { ok, _ ->
-            statusText = if (ok) "已卸载：$pluginName" else "卸载失败，请查看日志"
             if (ok) {
-                snackbarHost("已卸载：$pluginName（重启 dsh 服务后生效）")
+                applyAndRestart("已卸载：$pluginName")
+                snackbarHost("已卸载：$pluginName")
             } else {
+                statusText = "卸载失败，请查看日志"
                 showLog = true
             }
         }
@@ -565,6 +720,12 @@ fun DshPluginTabContent(
                         TextButton(onClick = { showLog = true }, enabled = !busy) {
                             Text("日志")
                         }
+                    }
+                    TextButton(
+                        onClick = { restartService() },
+                        enabled = !busy && !refreshing && runtimeRoot != null
+                    ) {
+                        Text("重启服务")
                     }
                 }
             }
